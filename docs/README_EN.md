@@ -1,5 +1,3 @@
-![CodexMCP](../images/title.png)
-
 <div align="center">
 
 A thin MCP wrapper around `codex exec --json`, with a synchronous compatibility tool, an async task pool, session resume support, and pollable structured events.
