@@ -15,7 +15,6 @@ from .stream_processor import StreamProcessor
 class TaskPool:
     MAX_CONCURRENT = 5
     MAX_EVENTS_PER_TASK = 100
-    EXECUTION_TIMEOUT_S = 1800
     RESULT_TTL_S = 600
     MAX_HISTORY = 50
     KILL_GRACE_S = 5
@@ -95,10 +94,6 @@ class TaskPool:
         task._process = proc
         task._reader_task = asyncio.create_task(self._read_stdout(task))
 
-        loop = asyncio.get_running_loop()
-        task._timeout_handle = loop.call_later(
-            self.EXECUTION_TIMEOUT_S, self._on_timeout, task_id
-        )
         return task_id
 
     def get_task(self, task_id: str) -> Optional[TaskInfo]:
@@ -159,9 +154,6 @@ class TaskPool:
         processes: list[asyncio.subprocess.Process] = []
 
         for task in running_tasks:
-            if task._timeout_handle:
-                task._timeout_handle.cancel()  # type: ignore[union-attr]
-                task._timeout_handle = None
             self._kill_process(task)
             reader = task._reader_task
             if isinstance(reader, asyncio.Task):
@@ -241,9 +233,6 @@ class TaskPool:
         if task.end_time:
             return
 
-        if task._timeout_handle:
-            task._timeout_handle.cancel()  # type: ignore[union-attr]
-            task._timeout_handle = None
         self._clear_kill_handle(task.task_id)
 
         task.exit_code = exit_code
@@ -262,14 +251,6 @@ class TaskPool:
             self._release_slot(task.task_id)
             return
         self._move_to_completed(task)
-
-    def _on_timeout(self, task_id: str) -> None:
-        if self._disposed:
-            return
-        task = self._running.get(task_id)
-        if task and task.status == TaskStatus.RUNNING:
-            task.status = TaskStatus.TIMEOUT
-            self._kill_process(task)
 
     def _kill_process(self, task: TaskInfo) -> None:
         proc: asyncio.subprocess.Process = task._process  # type: ignore[assignment]

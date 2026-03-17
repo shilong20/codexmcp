@@ -10,7 +10,6 @@ class TaskStatus(str, Enum):
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
-    TIMEOUT = "timeout"
     CANCELLED = "cancelled"
 
 
@@ -59,4 +58,3 @@ class TaskInfo:
     images: list[str] = field(default_factory=list)
     _process: object = field(default=None, repr=False)
     _reader_task: object = field(default=None, repr=False)
-    _timeout_handle: object = field(default=None, repr=False)

@@ -107,19 +107,11 @@ async def codex(
     except (RuntimeError, OSError) as e:
         return {"success": False, "error": str(e)}
 
-    try:
-        async with asyncio.timeout(_pool.EXECUTION_TIMEOUT_S):
-            while True:
-                task = _pool.get_task(task_id)
-                if task and task.status != TaskStatus.RUNNING:
-                    break
-                await asyncio.sleep(0.5)
-    except TimeoutError:
-        await _pool.cancel(task_id)
-        return {
-            "success": False,
-            "error": f"Task timed out after {_pool.EXECUTION_TIMEOUT_S}s",
-        }
+    while True:
+        task = _pool.get_task(task_id)
+        if task and task.status != TaskStatus.RUNNING:
+            break
+        await asyncio.sleep(0.5)
 
     if task.status == TaskStatus.COMPLETED:
         result: Dict[str, Any] = {

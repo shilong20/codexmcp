@@ -24,7 +24,7 @@ The five tools that matter in the current codebase are:
 | `codex` | Blocking wrapper that waits for completion | short tasks, legacy clients |
 | `codex_start` | Start an async task and return `task_id` immediately | long tasks, parallel work |
 | `codex_check` | Poll task status and incremental events | progress tracking |
-| `codex_cancel` | Cancel a running task | user aborts, timeout handling |
+| `codex_cancel` | Cancel a running task | user aborts |
 | `codex_list` | List running and recently completed tasks | debugging and operations |
 
 ---
@@ -436,7 +436,6 @@ These are the current code-backed limits that older docs often get wrong:
 | Item | Current value |
 | --- | --- |
 | max concurrent tasks | `5` |
-| per-task timeout | `1800s` |
 | retained events per task | `100` |
 | recent completed-result retention | `600s` |
 | max history entries | `50` |
