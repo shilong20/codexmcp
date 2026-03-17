@@ -1,5 +1,3 @@
-![CodexMCP](./images/title.png)
-
 <div align="center">
 
 一个围绕 `codex exec --json` 构建的薄包装 MCP 服务器，提供同步兼容接口、异步任务池、会话续跑与事件轮询。
