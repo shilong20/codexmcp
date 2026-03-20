@@ -89,6 +89,18 @@ npm install -g @openai/codex
 npx @openai/codex --version
 ```
 
+### uvx 拉取到旧版本 / 缓存问题
+
+**原因**：`uvx` 缓存了旧版本的包。
+**解决**：
+```bash
+# 刷新缓存
+uvx --refresh codex-mcp-server --help
+
+# 如果镜像源尚未同步最新版，临时使用官方源
+uvx --refresh --index-url https://pypi.org/simple/ codex-mcp-server --help
+```
+
 ## 日志位置
 
 | 文件 | 位置 |

@@ -26,8 +26,8 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/GuDaStudio/codexmcp"
-Repository = "https://github.com/GuDaStudio/codexmcp"
+Homepage = "https://github.com/shilong20/codexmcp"
+Repository = "https://github.com/shilong20/codexmcp"
 
 [project.scripts]
 codex-mcp-server = "codexmcp.cli:main"

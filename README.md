@@ -57,7 +57,7 @@ pip install codex-mcp-server
 
 ```bash
 claude mcp add codex -s user --transport stdio -- \
-  uvx --index-url https://pypi.org/simple/ codex-mcp-server
+  uvx codex-mcp-server
 ```
 
 验证：
@@ -72,26 +72,32 @@ claude mcp list
 
 ```json
 {
-  "codex": {
-    "command": "uvx",
-    "args": [
-      "--index-url", "https://pypi.org/simple/",
-      "codex-mcp-server"
-    ]
+  "mcpServers": {
+    "codex": {
+      "command": "uvx",
+      "args": ["codex-mcp-server"]
+    }
   }
 }
 ```
 
-### 更新
+### 更新到最新版
+
+`uvx` 会缓存已安装的包。更新到新版本时需要加 `--refresh` 刷新缓存：
 
 ```bash
-uvx --refresh --index-url https://pypi.org/simple/ codex-mcp-server --help
+uvx --refresh codex-mcp-server --help
 ```
+
+> **注意**：如果使用 PyPI 镜像源（如清华源），新版本可能需要 5-15 分钟才能同步。若 `--refresh` 仍拉取到旧版本，可临时指定官方源：
+> ```bash
+> uvx --refresh --index-url https://pypi.org/simple/ codex-mcp-server --help
+> ```
 
 ### 从源码安装（开发用）
 
 ```bash
-git clone https://github.com/GuDaStudio/codexmcp.git
+git clone https://github.com/shilong20/codexmcp.git
 cd codexmcp
 pip install -e .
 ```
@@ -227,7 +233,7 @@ pip install -e .
 ## 开发
 
 ```bash
-git clone https://github.com/GuDaStudio/codexmcp.git
+git clone https://github.com/shilong20/codexmcp.git
 cd codexmcp
 pip install -e .
 ```
