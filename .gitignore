@@ -1,3 +1,9 @@
 tests/
 __pycache__/
+*.pyc
 .trash/
+dist/
+build/
+*.egg-info/
+.codex-tasks/
+.memsearch/

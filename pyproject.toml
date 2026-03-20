@@ -3,9 +3,9 @@ requires = ["hatchling>=1.25"]
 build-backend = "hatchling.build"
 
 [project]
-name = "codexmcp"
-version = "0.7.4"
-description = "FastMCP server wrapping the Codex CLI."
+name = "codex-mcp-server"
+version = "1.0.0"
+description = "MCP server for Codex CLI with tmux persistence, git worktree isolation, and async dispatch."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -16,16 +16,18 @@ authors = [
     { name = "guda.studio", email = "gudaclaude@gmail.com" },
 ]
 license = { text = "MIT" }
-keywords = ["mcp", "fastmcp", "codex"]
+keywords = ["mcp", "fastmcp", "codex", "tmux", "worktree", "ai-agent"]
 classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
+    "Topic :: Software Development :: Libraries",
 ]
 
 [project.urls]
 Homepage = "https://github.com/GuDaStudio/codexmcp"
+Repository = "https://github.com/GuDaStudio/codexmcp"
 
 [project.scripts]
 codexmcp = "codexmcp.cli:main"

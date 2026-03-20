@@ -1,9 +1,21 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from typing import Optional
+
+from pydantic import BaseModel
+
+
+class SandboxMode(str, Enum):
+    READ_ONLY = "read-only"
+    FULL_ACCESS = "full-access"
+
+
+class TaskMode(str, Enum):
+    BLOCKING = "blocking"
+    DISPATCH = "dispatch"
 
 
 class TaskStatus(str, Enum):
@@ -22,6 +34,36 @@ class EventType(str, Enum):
     ERROR = "error"
 
 
+class TaskMeta(BaseModel):
+    """Persistent task metadata, serialised to ``~/.codexmcp/tasks/<id>/meta.json``."""
+
+    task_id: str
+    mode: TaskMode
+    prompt: str
+    cwd: str
+    sandbox: SandboxMode = SandboxMode.READ_ONLY
+    topic: str
+    tmux_session: str
+    log_file: str
+    prompt_file: str
+    start_time: str  # ISO-8601
+
+    status: TaskStatus = TaskStatus.RUNNING
+
+    # Worktree isolation (None when not used)
+    worktree_dir: Optional[str] = None
+    agent_branch: Optional[str] = None
+    base_branch: Optional[str] = None
+
+    # Codex session (populated after completion, used for resume)
+    session_id: Optional[str] = None
+
+    # Completion fields (populated after task finishes)
+    end_time: Optional[str] = None
+    exit_code: Optional[int] = None
+    result: Optional[str] = None
+
+
 @dataclass
 class TaskEvent:
     timestamp: datetime
@@ -36,25 +78,3 @@ class TaskUsage:
     input_tokens: int
     output_tokens: int
     cached_input_tokens: Optional[int] = None
-
-
-@dataclass
-class TaskInfo:
-    task_id: str
-    prompt: str
-    cwd: str
-    sandbox: str
-    start_time: datetime
-    status: TaskStatus = TaskStatus.RUNNING
-    events: list[TaskEvent] = field(default_factory=list)
-    event_base_index: int = 0
-    result: Optional[str] = None
-    exit_code: Optional[int] = None
-    end_time: Optional[datetime] = None
-    usage: Optional[TaskUsage] = None
-    session_id: Optional[str] = None
-    profile: Optional[str] = None
-    reasoning_effort: Optional[str] = None
-    images: list[str] = field(default_factory=list)
-    _process: object = field(default=None, repr=False)
-    _reader_task: object = field(default=None, repr=False)

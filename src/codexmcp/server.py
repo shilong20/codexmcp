@@ -1,332 +1,252 @@
-"""FastMCP server implementation for the Codex MCP project."""
+"""FastMCP server — 4 tools backed by tmux + worktree task manager."""
 
 from __future__ import annotations
 
-import asyncio
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated, Any, Dict, List, Literal, Optional
+from typing import Annotated, Any, Dict, Literal
 
 from mcp.server.fastmcp import FastMCP
 from pydantic import Field
 
-from .models import TaskStatus
-from .task_pool import TaskPool
+from . import task_manager
+from .models import SandboxMode, TaskMode, TaskStatus
 
 mcp = FastMCP("Codex MCP Server-from guda.studio")
 
-_pool = TaskPool()
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _calc_elapsed(meta: task_manager.TaskMeta) -> float:
+    try:
+        start = datetime.fromisoformat(meta.start_time)
+        end = (
+            datetime.fromisoformat(meta.end_time)
+            if meta.end_time
+            else datetime.now()
+        )
+        return round((end - start).total_seconds(), 1)
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def _build_result(meta: task_manager.TaskMeta) -> Dict[str, Any]:
+    """Build the standard result dict from completed task metadata."""
+    result_text, session_id, usage = task_manager._parse_log(meta.log_file)
+    resp: Dict[str, Any] = {
+        "success": meta.status == TaskStatus.COMPLETED,
+        "task_id": meta.task_id,
+        "session_id": session_id or meta.session_id,
+        "result": result_text or meta.result,
+        "exit_code": meta.exit_code,
+        "elapsed_seconds": _calc_elapsed(meta),
+    }
+    if usage:
+        resp["usage"] = {
+            "input_tokens": usage.input_tokens,
+            "output_tokens": usage.output_tokens,
+        }
+    if meta.worktree_dir:
+        resp["worktree_dir"] = meta.worktree_dir
+        resp["agent_branch"] = meta.agent_branch
+        resp["base_branch"] = meta.base_branch
+    return resp
+
+
+async def _enrich_worktree_info(
+    resp: Dict[str, Any], meta: task_manager.TaskMeta
+) -> None:
+    """Add diff stats to the response for worktree-backed tasks."""
+    if not meta.worktree_dir or not meta.base_branch:
+        return
+    try:
+        from . import worktree
+
+        commits = await worktree.get_commits_ahead(
+            meta.worktree_dir, meta.base_branch
+        )
+        diff_stat = await worktree.get_diff_stat(
+            meta.worktree_dir, meta.base_branch
+        )
+        resp["commits_ahead"] = commits
+        if diff_stat:
+            resp["diff_stat"] = diff_stat
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Tools
+# ---------------------------------------------------------------------------
 
 
 @mcp.tool(
     name="codex",
-    description="""
-    Executes a non-interactive Codex session via CLI to perform AI-assisted coding tasks in a secure workspace.
-    This tool wraps the `codex exec` command, enabling model-driven code generation, debugging, or automation based on natural language prompts.
-    It supports resuming ongoing sessions for continuity and enforces sandbox policies to prevent unsafe operations. Ideal for integrating Codex into MCP servers for agentic workflows, such as code reviews or repo modifications.
-
-    **Key Features:**
-        - **Prompt-Driven Execution:** Send task instructions to Codex for step-by-step code handling.
-        - **Workspace Isolation:** Operate within a specified directory, with optional Git repo skipping.
-        - **Security Controls:** Three sandbox levels balance functionality and safety.
-        - **Session Persistence:** Resume prior conversations via `SESSION_ID` for iterative tasks.
-
-    **Edge Cases & Best Practices:**
-        - Ensure `cd` exists and is accessible; tool fails silently on invalid paths.
-        - If needed, set `return_all_messages` to `True` to parse "all_messages" for detailed tracing (e.g., reasoning, tool calls, etc.).
-        - If you pass `model_reasoning_effort`, prefer `high` for actual code writing and `xhigh` for debugging, review, analysis, and other non-writing tasks.
-
-    **Sandbox guidelines:**
-        - For code reviews, analysis, or read-only tasks: use `read-only` (default).
-        - For writing code, debugging, refactoring, or any task that needs to modify files: use `danger-full-access`.
-        - When in doubt, prefer `danger-full-access` for coding/debug tasks to avoid sandbox permission errors.
-
-    NOTE: This is the synchronous compatibility wrapper. For long-running tasks, prefer `codex_start` + `codex_check` for async polling.
-    """,
-    meta={"version": "0.0.0", "author": "guda.studio"},
+    description=(
+        "Execute a Codex task and block until completion. "
+        "Use read-only sandbox for reviews/analysis, full-access for code modifications. "
+        "full-access mode creates a git worktree for isolation. "
+        "Returns the final result, session_id (for resume), and git diff stats."
+    ),
 )
 async def codex(
-    PROMPT: Annotated[str, "Instruction for the task to send to codex."],
-    cd: Annotated[
-        Path, "Set the workspace root for codex before executing the task."
+    prompt: Annotated[str, "Task instruction to send to Codex."],
+    cwd: Annotated[Path, "Workspace root directory for Codex."],
+    topic: Annotated[
+        str,
+        "Task identifier used for tmux session, worktree branch, and task tracking.",
     ],
     sandbox: Annotated[
-        Literal["read-only", "workspace-write", "danger-full-access"],
+        Literal["read-only", "full-access"],
         Field(
-            description="Sandbox policy for model-generated commands. Defaults to `read-only`."
+            description=(
+                "Permission mode. read-only for reviews/analysis, "
+                "full-access for code writing (creates git worktree)."
+            )
         ),
-    ] = "read-only",
-    SESSION_ID: Annotated[
+    ],
+    session_id: Annotated[
         str,
-        "Resume the specified session of the codex. Defaults to `None`, start a new session.",
-    ] = "",
-    skip_git_repo_check: Annotated[
-        bool,
-        "Allow codex running outside a Git repository (useful for one-off directories).",
-    ] = True,
-    return_all_messages: Annotated[
-        bool,
-        "Return all messages (e.g. reasoning, tool calls, etc.) from the codex session. Set to `False` by default, only the agent's final reply message is returned.",
-    ] = False,
-    image: Annotated[
-        List[Path],
-        Field(
-            description="Attach one or more image files to the initial prompt.",
-        ),
-    ] = [],
-    dangerously_bypass_approvals_and_sandbox: Annotated[
-        bool,
-        Field(
-            description="Skip all confirmation prompts and execute commands without sandboxing. EXTREMELY DANGEROUS. Only use when `sandbox` couldn't be applied.",
-        ),
-    ] = False,
-    profile: Annotated[
-        str,
-        "Configuration profile name to load from `~/.codex/config.toml`. This parameter is strictly prohibited unless explicitly specified by the user.",
-    ] = "",
-    model_reasoning_effort: Annotated[
-        str,
-        Field(
-            description="Optional reasoning effort override passed through to Codex CLI config. Agent guidance: use `high` for actual code-writing tasks, and `xhigh` for debugging, review, analysis, and other non-writing tasks."
-        ),
+        "Resume a previous Codex session by its ID. Leave empty to start new.",
     ] = "",
 ) -> Dict[str, Any]:
-    """Synchronous compatibility wrapper — blocks until the task completes."""
+    """Execute a blocking Codex task — waits for completion and returns result."""
+    resolved_cwd = str(cwd.expanduser().resolve())
     try:
-        task_id = await _pool.start(
-            PROMPT,
-            str(cd),
-            sandbox,
-            session_id=SESSION_ID,
-            skip_git_repo_check=skip_git_repo_check,
-            images=[str(p) for p in image] if image else None,
-            profile=profile,
-            model_reasoning_effort=model_reasoning_effort,
-            dangerously_bypass=dangerously_bypass_approvals_and_sandbox,
+        meta = await task_manager.start_task(
+            prompt,
+            resolved_cwd,
+            topic,
+            SandboxMode(sandbox),
+            mode=TaskMode.BLOCKING,
+            session_id=session_id,
         )
     except (RuntimeError, OSError) as e:
         return {"success": False, "error": str(e)}
 
-    while True:
-        task = _pool.get_task(task_id)
-        if task and task.status != TaskStatus.RUNNING:
-            break
-        await asyncio.sleep(0.5)
-
-    if task.status == TaskStatus.COMPLETED:
-        result: Dict[str, Any] = {
-            "success": True,
-            "SESSION_ID": task.session_id,
-            "agent_messages": task.result,
-        }
-    else:
-        result = {
-            "success": False,
-            "error": f"Task {task.status.value}: {task.result or 'No output'}",
-        }
-
-    if return_all_messages:
-        events = _pool.get_events(task_id)
-        result["all_messages"] = [
-            {
-                "type": e.type.value,
-                "text": e.text,
-                "tool_name": e.tool_name,
-                "tool_input": e.tool_input,
-                "timestamp": e.timestamp.isoformat(),
-            }
-            for e in events
-        ]
-
-    return result
+    meta = await task_manager.wait_for_completion(meta.task_id)
+    resp = _build_result(meta)
+    await _enrich_worktree_info(resp, meta)
+    return resp
 
 
 @mcp.tool(
-    name="codex_start",
-    description="""
-    Start an async Codex task and return immediately with a task_id.
-    Use `codex_check` to poll for progress and results.
-    Use `codex_cancel` to cancel a running task.
-
-    This is the recommended approach for long-running tasks — it avoids
-    blocking the MCP connection while Codex works.
-
-    **Sandbox guidelines:**
-        - For code reviews, analysis, or read-only tasks: use `read-only` (default).
-        - For writing code, debugging, refactoring, or any task that needs to modify files: use `danger-full-access`.
-        - When in doubt, prefer `danger-full-access` for coding/debug tasks to avoid sandbox permission errors.
-        - If you pass `model_reasoning_effort`, prefer `high` for actual code writing and `xhigh` for debugging, review, analysis, and other non-writing tasks.
-    """,
+    name="codex_dispatch",
+    description=(
+        "Dispatch a long-running Codex task to background and return immediately. "
+        "The task runs in a persistent tmux session that survives disconnects. "
+        "Use codex_status to check progress and codex_cancel to stop."
+    ),
 )
-async def codex_start(
-    prompt: Annotated[str, "Instruction for the task to send to codex."],
-    cwd: Annotated[
-        Path, "Set the workspace root for codex before executing the task."
+async def codex_dispatch(
+    prompt: Annotated[str, "Task instruction to send to Codex."],
+    cwd: Annotated[Path, "Workspace root directory for Codex."],
+    topic: Annotated[
+        str,
+        "Task identifier used for tmux session, worktree branch, and task tracking.",
     ],
     sandbox: Annotated[
-        Literal["read-only", "workspace-write", "danger-full-access"],
+        Literal["read-only", "full-access"],
         Field(
-            description="Sandbox policy for model-generated commands. Defaults to `read-only`."
+            description=(
+                "Permission mode. read-only for reviews/analysis, "
+                "full-access for code writing (creates git worktree)."
+            )
         ),
-    ] = "read-only",
+    ],
     session_id: Annotated[
-        str, "Resume a previous session by its ID. Empty string starts new."
-    ] = "",
-    skip_git_repo_check: Annotated[
-        bool,
-        "Allow codex running outside a Git repository.",
-    ] = True,
-    image: Annotated[
-        List[Path],
-        Field(
-            description="Attach one or more image files to the initial prompt.",
-        ),
-    ] = [],
-    dangerously_bypass_approvals_and_sandbox: Annotated[
-        bool,
-        Field(
-            description="Skip all confirmation prompts and execute without sandboxing. EXTREMELY DANGEROUS.",
-        ),
-    ] = False,
-    profile: Annotated[
         str,
-        "Configuration profile name to load from `~/.codex/config.toml`.",
-    ] = "",
-    model_reasoning_effort: Annotated[
-        str,
-        Field(
-            description="Optional reasoning effort override passed through to Codex CLI config. Agent guidance: use `high` for actual code-writing tasks, and `xhigh` for debugging, review, analysis, and other non-writing tasks."
-        ),
+        "Resume a previous Codex session by its ID. Leave empty to start new.",
     ] = "",
 ) -> Dict[str, Any]:
-    """Start an async Codex task."""
+    """Start an async Codex task and return immediately with a task_id."""
+    resolved_cwd = str(cwd.expanduser().resolve())
     try:
-        task_id = await _pool.start(
+        meta = await task_manager.start_task(
             prompt,
-            str(cwd),
-            sandbox,
+            resolved_cwd,
+            topic,
+            SandboxMode(sandbox),
+            mode=TaskMode.DISPATCH,
             session_id=session_id,
-            skip_git_repo_check=skip_git_repo_check,
-            images=[str(p) for p in image] if image else None,
-            profile=profile,
-            model_reasoning_effort=model_reasoning_effort,
-            dangerously_bypass=dangerously_bypass_approvals_and_sandbox,
         )
     except (RuntimeError, OSError) as e:
         return {"error": str(e)}
 
     return {
-        "task_id": task_id,
+        "task_id": meta.task_id,
         "status": "running",
-        "started_at": datetime.now().isoformat(),
+        "topic": meta.topic,
+        "started_at": meta.start_time,
+        "log_file": meta.log_file,
+        "worktree_dir": meta.worktree_dir,
     }
 
 
 @mcp.tool(
-    name="codex_check",
-    description="""
-    Check the status and progress of an async Codex task.
-    Returns current status, elapsed time, recent events (text/commands/tool calls),
-    and final result when completed.
-
-    Use `since_event_index` for incremental polling — only new events are returned.
-    """,
+    name="codex_status",
+    description=(
+        "Check task status. Pass task_id for single task detail "
+        "(with progress events if running, or result/diff if completed). "
+        "Omit task_id to list all tasks."
+    ),
 )
-async def codex_check(
-    task_id: Annotated[str, "The task_id returned by codex_start."],
-    include_events: Annotated[
-        bool, "Include recent events in the response."
-    ] = True,
-    since_event_index: Annotated[
-        int,
-        "Only return events after this index (for incremental polling). 0 returns all.",
-    ] = 0,
+async def codex_status(
+    task_id: Annotated[
+        str,
+        "Task ID to query. Leave empty to list all tasks.",
+    ] = "",
 ) -> Dict[str, Any]:
-    """Check async Codex task status."""
-    task = _pool.get_task(task_id)
+    """Check Codex task status or list all tasks."""
+    if task_id:
+        try:
+            return await task_manager.get_task_status_detail(task_id)
+        except ValueError as e:
+            return {"error": str(e)}
 
-    if not task:
-        hist = _pool.get_history_entry(task_id)
-        if hist:
-            return {"task_id": task_id, "status": "expired", "summary": hist}
-        return {"error": f"Task not found: {task_id}"}
-
-    elapsed = (task.end_time or datetime.now()) - task.start_time
-    resp: Dict[str, Any] = {
-        "task_id": task_id,
-        "status": task.status.value,
-        "elapsed_ms": int(elapsed.total_seconds() * 1000),
-    }
-
-    if include_events:
-        events = _pool.get_events(task_id, since=since_event_index)
-        resp["event_base_index"] = task.event_base_index
-        resp["recent_events"] = [
-            {
-                "type": e.type.value,
-                "text": e.text,
-                "tool_name": e.tool_name,
-                "tool_input": e.tool_input,
-                "timestamp": e.timestamp.isoformat(),
-            }
-            for e in events
-        ]
-        resp["total_events"] = len(task.events) + task.event_base_index
-
-    if task.status != TaskStatus.RUNNING:
-        resp["exit_code"] = task.exit_code
-        resp["result"] = task.result
-        resp["session_id"] = task.session_id
-        if task.usage:
-            resp["usage"] = {
-                "input_tokens": task.usage.input_tokens,
-                "output_tokens": task.usage.output_tokens,
-                "cached_input_tokens": task.usage.cached_input_tokens,
-            }
-
-    return resp
+    all_tasks = task_manager.list_tasks()
+    summaries = []
+    for t in all_tasks:
+        if t.status == TaskStatus.RUNNING:
+            t = await task_manager.resolve_status(t.task_id)
+        summaries.append({
+            "task_id": t.task_id,
+            "topic": t.topic,
+            "status": t.status.value,
+            "mode": t.mode.value,
+            "elapsed_seconds": _calc_elapsed(t),
+        })
+    return {"tasks": summaries}
 
 
 @mcp.tool(
     name="codex_cancel",
-    description="Cancel a running Codex task. Sends SIGTERM then SIGKILL after 5s grace.",
+    description="Cancel a running Codex task by killing its tmux session.",
 )
 async def codex_cancel(
-    task_id: Annotated[str, "The task_id to cancel."],
+    task_id: Annotated[str, "The task ID to cancel."],
 ) -> Dict[str, Any]:
     """Cancel a running Codex task."""
-    ok = await _pool.cancel(task_id)
-    if not ok:
-        task = _pool.get_task(task_id)
-        if task:
-            return {
-                "task_id": task_id,
-                "status": task.status.value,
-                "message": "Task is not running",
-            }
-        return {"error": f"Task not found: {task_id}"}
+    try:
+        meta = await task_manager.cancel_task(task_id)
+    except ValueError as e:
+        return {"error": str(e)}
 
-    task = _pool.get_task(task_id)
-    elapsed = (datetime.now() - task.start_time) if task else None
     return {
         "task_id": task_id,
-        "status": "cancelled",
-        "elapsed_ms": int(elapsed.total_seconds() * 1000) if elapsed else 0,
+        "status": meta.status.value,
+        "elapsed_seconds": _calc_elapsed(meta),
     }
 
 
-@mcp.tool(
-    name="codex_list",
-    description="List all Codex tasks (running + recently completed). No parameters needed.",
-)
-async def codex_list() -> Dict[str, Any]:
-    """List all Codex tasks."""
-    return {"tasks": _pool.list_all()}
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
 
 
 def run() -> None:
     """Start the MCP server over stdio transport."""
-    try:
-        mcp.run(transport="stdio")
-    finally:
-        asyncio.run(_pool.dispose())
+    mcp.run(transport="stdio")
