@@ -1,91 +1,69 @@
 # 场景：长任务后台分派
 
-## 适用条件
+## 触发条件
 
-- 任务预计执行时间较长（数十分钟到数小时）
-- 分派后可以结束当前对话
-- 下次打开时通过 codex_status 查看结果
+仅在以下情况使用 `codex_dispatch`：
+1. 用户**明确要求**分派/后台执行/长任务
+2. 你有清晰计划，Codex 后台执行期间你自己有实质性工作
+
+其他情况一律用阻塞模式 `codex`。
 
 ## 基本流程
 
 ```
-1. 调用 codex_dispatch（async, full-access）→ 立即返回 task_id
-2. 结束当前对话
-3. 下次打开对话，调用 codex_status 查看状态
-4. 完成后审阅 diff，合并到主分支
+1. 确保工作区已 commit
+2. codex_dispatch (full-access) → 立即返回 task_id
+3. 继续做其他工作 / 结束对话
+4. codex_status 查看状态
+5. 完成后审阅 diff → 合并
 ```
 
-## 示例：分派长任务
+## Prompt 编写
+
+在四要素基础上，dispatch prompt 必须**自包含**（分派后无交互）：
+
+| 原则 | 说明 |
+|------|------|
+| 引用计划文档 | `详细计划见 docs/plans/...`，Codex 可读 worktree 中的文件 |
+| 分步描述 | 每步编号，减少歧义 |
+| 分步提交 | `每完成一个模块 commit`，不堆到最后 |
+| 完成标志 | 创建特定文件（如 CHANGELOG.md）作为完成标识 |
+
+## 示例
 
 ```
-CallMcpTool(server="codexmcp", toolName="codex_dispatch", arguments={
-  "prompt": "对整个项目进行以下重构：\n1. 将所有同步 IO 改为异步\n2. 添加类型注解\n3. 补充单元测试覆盖率到 80%\n\n详细计划见 docs/plans/2026-03-20-refactor.md",
+CallMcpTool(server="codex", toolName="codex_dispatch", arguments={
+  "prompt": "# Codex 任务：数据库层异步化\n\n## Goal\n将 src/db/ 下同步操作改为异步。\n\n## 步骤\n1. src/db/session.py：create_engine → create_async_engine\n2. 逐个修改 src/db/ 下模块\n3. 每完成一个模块 commit\n4. 更新 requirements.txt\n\n## Done-when\npytest tests/test_db/ 通过\n根目录创建 CHANGELOG.md\n\n## 提交\n每模块：refactor(db): async <module>",
   "cwd": "/workspace/my-project",
-  "topic": "refactor-async",
+  "topic": "longrun-async_refactor-v1",
   "sandbox": "full-access"
 })
 ```
 
-返回：
-```json
-{
-  "task_id": "codex-refactor-async",
-  "status": "running",
-  "topic": "refactor-async",
-  "log_file": "/home/user/.codexmcp/tasks/codex-refactor-async/codex-exec.log"
-}
-```
-
-## 查看进度
-
-下次打开对话时：
+## 查看与取消
 
 ```
-CallMcpTool(server="codexmcp", toolName="codex_status", arguments={
-  "task_id": "codex-refactor-async"
+# 查看
+CallMcpTool(server="codex", toolName="codex_status", arguments={
+  "task_id": "codex-longrun-async_refactor-v1"
+})
+
+# 列出所有任务
+CallMcpTool(server="codex", toolName="codex_status", arguments={})
+
+# 取消
+CallMcpTool(server="codex", toolName="codex_cancel", arguments={
+  "task_id": "codex-longrun-async_refactor-v1"
 })
 ```
 
-运行中返回：
-```json
-{
-  "status": "running",
-  "elapsed_seconds": 1234.5,
-  "recent_events": [
-    {"type": "command", "text": "git add src/..."},
-    {"type": "text", "text": "Now working on async IO conversion..."}
-  ]
-}
-```
+## 实时日志
 
-完成后返回：
-```json
-{
-  "status": "completed",
-  "exit_code": 0,
-  "result": "Codex 的完成报告...",
-  "session_id": "thread_xyz",
-  "diff_stat": "42 files changed, 1500 insertions(+), 800 deletions(-)",
-  "commits_ahead": 15
-}
-```
-
-## 列出所有任务
-
-```
-CallMcpTool(server="codexmcp", toolName="codex_status", arguments={})
-```
-
-## 实时查看日志
-
-两种方式：
-- IDE 中打开 `.codex-tasks/refactor-async/codex-exec.log`
-- 终端：`tmux attach -t codex-refactor-async`（Ctrl+B, D 退出）
+- IDE：`.codex-tasks/longrun-async_refactor-v1/codex-exec.log`（含版本号）
+- 终端：`tmux attach -t codex-longrun-async_refactor-v1`（tmux session 含版本号）
 
 ## 注意事项
 
-- 分派任务运行在 tmux 中，MCP 服务重启后仍可通过 codex_status 查询
-- **full-access worktree 基于当前 HEAD commit 创建，不含未提交的改动**。分派前请先 commit
-- 长任务建议在 prompt 中附上详细计划文档
-- 任务完成后仍需人工审阅 diff 再合并
-- 取消：`codex_cancel(task_id="codex-refactor-async")`
+- 运行在 tmux 中，MCP 重启/断连后仍可查询
+- **worktree 基于 HEAD 创建**，先 commit
+- 完成后仍需人工审阅 diff 再合并

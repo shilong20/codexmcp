@@ -124,7 +124,7 @@ async def codex(
             mode=TaskMode.BLOCKING,
             session_id=session_id,
         )
-    except (RuntimeError, OSError) as e:
+    except (RuntimeError, OSError, ValueError) as e:
         return {"success": False, "error": str(e)}
 
     meta = await task_manager.wait_for_completion(meta.task_id)
@@ -173,7 +173,7 @@ async def codex_dispatch(
             mode=TaskMode.DISPATCH,
             session_id=session_id,
         )
-    except (RuntimeError, OSError) as e:
+    except (RuntimeError, OSError, ValueError) as e:
         return {"error": str(e)}
 
     return {

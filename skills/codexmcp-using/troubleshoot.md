@@ -1,10 +1,10 @@
 # 故障排查
 
-## 前置条件安装
+## 前置条件
 
-### tmux
+### tmux（仅 full-access 模式需要）
 
-tmux 是必须的，所有任务都通过 tmux session 运行。
+read-only 模式不使用 tmux，直接 subprocess 执行。full-access 模式（含 dispatch）需要 tmux：
 
 ```bash
 # Ubuntu/Debian
@@ -20,9 +20,9 @@ sudo yum install tmux
 tmux -V
 ```
 
-### git
+### git（仅 full-access 模式需要）
 
-git 在 full-access 模式下必须（用于创建 worktree）。
+full-access 模式通过 git worktree 创建隔离开发环境：
 
 ```bash
 # Ubuntu/Debian
@@ -35,17 +35,28 @@ brew install git
 git --version
 ```
 
+### codex CLI
+
+```bash
+# 安装
+npm install -g @openai/codex
+
+# 验证
+codex --version
+```
+
 ## 常见错误
 
-### "tmux is required but not found"
+### "tmux is required for full-access mode but not found"
 
-**原因**：tmux 未安装或不在 PATH 中。
-**解决**：按上面的说明安装 tmux。如果已安装但 MCP 进程找不到，检查 MCP 服务进程的 PATH 环境变量。
+**原因**：选择了 full-access sandbox 但 tmux 未安装。
+**解决**：安装 tmux（见上方），或改用 read-only sandbox（如果任务不需要修改代码）。
+**注意**：read-only 模式不需要 tmux。
 
 ### "git is required for full-access mode"
 
-**原因**：选择了 full-access sandbox 但 git 未安装。
-**解决**：安装 git，或改用 read-only sandbox（如果任务不需要修改代码）。
+**原因**：选择了 full-access sandbox 但 git 未安装或 cwd 不在 git 仓库内。
+**解决**：安装 git 并确保 cwd 在 git 仓库内，或改用 read-only sandbox。
 
 ### "Task 'codex-xxx' is already running"
 
@@ -63,31 +74,30 @@ git worktree remove /path/to/worktree --force
 git branch -D agent/<topic>
 ```
 
-### 阻塞任务（codex）长时间无响应
+### bwrap: No permissions to create a new namespace
 
-**原因**：Codex 进程可能挂死或陷入死循环，导致 tmux session 一直存活但不产出结果。
+**原因**：容器环境中 bubblewrap sandbox 无法创建 namespace。
+**影响**：read-only 模式下 Codex 可以正常推理和返回结果，但其内部 shell 工具执行会受限。
 **解决**：
-1. 在终端中手动终止：`tmux kill-session -t codex-<topic>`
-2. 任务会自动标记为 failed
-3. 如果 MCP 调用仍在阻塞，可能需要重启 MCP 服务或 Cursor
+- 对于审阅/分析任务：正常使用 read-only，Codex 可以阅读代码但无法执行 shell 命令
+- 对于需要执行命令的任务：改用 full-access 模式
+- 已内置 `--ephemeral` 跳过持久化 sandbox 创建
+
+### 阻塞任务长时间无响应
+
+**原因**：Codex 进程可能挂死或陷入死循环。
+**解决**：
+1. full-access 模式：在终端 `tmux kill-session -t codex-<topic>` 终止
+2. read-only 模式：进程会在完成后自动返回，如需强制终止需重启 MCP 服务
+3. dispatch 模式：用 `codex_cancel` 取消
 
 ### 任务状态显示 "failed"，result 为 "tmux session terminated unexpectedly"
 
-**原因**：tmux session 在 codex 完成前意外退出。可能是系统 OOM、手动 kill 等。
+**原因**：tmux session 在 codex 完成前意外退出（系统 OOM、手动 kill 等）。
 **解决**：
-1. 检查日志：`cat ~/.codexmcp/tasks/<task_id>/codex-exec.log`
+1. 检查日志：`~/.codexmcp/tasks/<task_id>/codex-exec.log`
 2. 检查系统日志：`dmesg | tail` 或 `journalctl -xe`
 3. 重新分派任务
-
-### codex 命令未找到
-
-**原因**：codex CLI 未安装或不在 PATH 中。
-**解决**：
-```bash
-npm install -g @openai/codex
-# 或
-npx @openai/codex --version
-```
 
 ### uvx 拉取到旧版本 / 缓存问题
 
@@ -95,10 +105,10 @@ npx @openai/codex --version
 **解决**：
 ```bash
 # 刷新缓存
-uvx --refresh codex-mcp-server --help
+uvx --refresh --from codex-mcp-server codexmcp --help
 
 # 如果镜像源尚未同步最新版，临时使用官方源
-uvx --refresh --index-url https://pypi.org/simple/ codex-mcp-server --help
+uvx --refresh --index-url https://pypi.org/simple/ --from codex-mcp-server codexmcp --help
 ```
 
 ## 日志位置
@@ -112,21 +122,23 @@ uvx --refresh --index-url https://pypi.org/simple/ codex-mcp-server --help
 
 ## 手动清理
 
+示例以 topic `implement-user_register-v1` 为例：
+
 ```bash
-# 清理特定任务
-rm -rf ~/.codexmcp/tasks/codex-<topic>
-rm -f <cwd>/.codex-tasks/<topic>
+# 清理特定任务（task_id 含版本号）
+rm -rf ~/.codexmcp/tasks/codex-implement-user_register-v1
+rm -f <cwd>/.codex-tasks/implement-user_register-v1
 
 # 清理所有任务
 rm -rf ~/.codexmcp/tasks/
 
-# 清理 worktree
+# 清理 worktree（分支名不含版本号）
 cd /path/to/repo
-git worktree list  # 查看所有 worktree
-git worktree remove ../repo-agent-<topic> --force
-git branch -D agent/<topic>
+git worktree list
+git worktree remove ../repo-agent-implement-user_register --force
+git branch -D agent/implement-user_register
 
-# 清理 tmux session
-tmux kill-session -t codex-<topic>
-tmux ls | grep codex-  # 列出所有 codex session
+# 清理 tmux session（仅 full-access，session 名含版本号）
+tmux kill-session -t codex-implement-user_register-v1
+tmux ls | grep codex-
 ```

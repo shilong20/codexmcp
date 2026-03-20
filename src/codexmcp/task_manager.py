@@ -33,6 +33,42 @@ def _ensure_task_dir(task_id: str) -> Path:
     return d
 
 
+_VALID_TYPES = {"review", "implement", "longrun", "test"}
+
+_TOPIC_RE = re.compile(
+    r"^(?P<type>[a-z]+)-(?P<desc>[a-zA-Z0-9_]+(?:-[a-zA-Z0-9_]+)*)-v(?P<ver>\d+)$"
+)
+
+
+def parse_topic(topic: str) -> tuple[str, str, str]:
+    """Parse ``<type>-<description>-v<version>`` and return (type, desc, version).
+
+    Raises ``ValueError`` if the format is invalid.
+    """
+    m = _TOPIC_RE.match(topic)
+    if not m:
+        raise ValueError(
+            f"Invalid topic '{topic}'. "
+            "Expected format: <type>-<description>-v<version>  "
+            f"(type: {'/'.join(sorted(_VALID_TYPES))}, "
+            "description: words_joined_by_underscores, "
+            "version: integer).  "
+            "Example: review-auth_handler-v1"
+        )
+    t, desc, ver = m.group("type"), m.group("desc"), m.group("ver")
+    if t not in _VALID_TYPES:
+        raise ValueError(
+            f"Unknown topic type '{t}'. Must be one of: "
+            f"{', '.join(sorted(_VALID_TYPES))}"
+        )
+    return t, desc, ver
+
+
+def _worktree_key(topic_type: str, topic_desc: str) -> str:
+    """Return the version-independent key used for worktree dirs and branches."""
+    return f"{topic_type}-{topic_desc}"
+
+
 def _generate_task_id(topic: str) -> str:
     safe = re.sub(r"[^a-zA-Z0-9_-]", "-", topic).strip("-")
     return f"codex-{safe}"
@@ -121,9 +157,12 @@ async def start_task(
     When *sandbox* is ``FULL_ACCESS`` and *cwd* is inside a git repo, a
     worktree is created for isolation.
     """
-    if not tmux.available():
+    topic_type, topic_desc, _topic_ver = parse_topic(topic)
+
+    use_tmux = sandbox == SandboxMode.FULL_ACCESS
+    if use_tmux and not tmux.available():
         raise RuntimeError(
-            "tmux is required but not found. "
+            "tmux is required for full-access mode but not found. "
             "Install: apt install tmux / brew install tmux"
         )
     if sandbox == SandboxMode.FULL_ACCESS and not worktree.git_available():
@@ -132,21 +171,31 @@ async def start_task(
             "Install: apt install git / brew install git"
         )
 
-    safe_topic = re.sub(r"[^a-zA-Z0-9_-]", "-", topic).strip("-")
-    if not safe_topic:
-        raise RuntimeError(
-            f"Invalid topic '{topic}': must contain at least one "
-            "alphanumeric character (a-z, A-Z, 0-9) or underscore."
-        )
-    task_id = f"codex-{safe_topic}"
+    task_id = _generate_task_id(topic)
+    wt_key = _worktree_key(topic_type, topic_desc)
 
     existing = load_task(task_id)
     if existing and existing.status == TaskStatus.RUNNING:
-        if await tmux.session_exists(task_id):
+        if use_tmux and await tmux.session_exists(task_id):
             raise RuntimeError(
                 f"Task '{task_id}' is already running. "
                 "Cancel it first or choose a different topic."
             )
+
+    if sandbox == SandboxMode.FULL_ACCESS:
+        for t in list_tasks():
+            if t.status != TaskStatus.RUNNING or t.task_id == task_id:
+                continue
+            try:
+                t_type, t_desc, _ = parse_topic(t.topic)
+            except ValueError:
+                continue
+            if _worktree_key(t_type, t_desc) == wt_key:
+                raise RuntimeError(
+                    f"Another task '{t.task_id}' is still running on the "
+                    f"same worktree (agent/{wt_key}). Wait for it to finish "
+                    "or cancel it first."
+                )
 
     # --- worktree ---
     wt_dir: Optional[str] = None
@@ -163,7 +212,7 @@ async def start_task(
         if repo_root:
             base_branch = await worktree.get_current_branch(repo_root)
             wt_dir, agent_branch = await worktree.create_worktree(
-                repo_root, safe_topic, base_branch
+                repo_root, wt_key, base_branch
             )
             effective_cwd = wt_dir
 
@@ -173,6 +222,7 @@ async def start_task(
     prompt_file = str(task_dir / "prompt.md")
     Path(prompt_file).write_text(prompt, encoding="utf-8")
 
+    safe_topic = re.sub(r"[^a-zA-Z0-9_-]", "-", topic).strip("-")
     _create_workspace_symlink(cwd, safe_topic, task_dir)
 
     # --- codex command ---
@@ -183,17 +233,7 @@ async def start_task(
     )
     codex_cmd_str = " ".join(shlex.quote(a) for a in codex_args)
 
-    shell_cmd = (
-        f"set -o pipefail; cd {shlex.quote(effective_cwd)} && "
-        f"{codex_cmd_str} < {shlex.quote(prompt_file)} "
-        f"2>&1 | tee {shlex.quote(log_file)}; "
-        f"echo 'EXIT_CODE='${{PIPESTATUS[0]}} >> {shlex.quote(log_file)}"
-    )
-
-    # --- tmux ---
-    await tmux.create_session(task_id, shell_cmd)
-
-    # --- persist ---
+    # --- persist (before launch so meta exists for status checks) ---
     meta = TaskMeta(
         task_id=task_id,
         mode=mode,
@@ -201,7 +241,7 @@ async def start_task(
         cwd=cwd,
         sandbox=sandbox,
         topic=topic,
-        tmux_session=task_id,
+        tmux_session=task_id if use_tmux else "",
         log_file=log_file,
         prompt_file=prompt_file,
         start_time=datetime.now().isoformat(),
@@ -210,7 +250,58 @@ async def start_task(
         base_branch=base_branch,
     )
     save_task(meta)
+
+    if use_tmux:
+        shell_cmd = (
+            f"set -o pipefail; cd {shlex.quote(effective_cwd)} && "
+            f"{codex_cmd_str} < {shlex.quote(prompt_file)} "
+            f"2>&1 | tee {shlex.quote(log_file)}; "
+            f"echo 'EXIT_CODE='${{PIPESTATUS[0]}} >> {shlex.quote(log_file)}"
+        )
+        await tmux.create_session(task_id, shell_cmd)
+    else:
+        await _run_direct(codex_args, prompt_file, log_file, effective_cwd, meta)
+
     return meta
+
+
+# ---------------------------------------------------------------------------
+# Direct subprocess execution (read-only, no tmux)
+# ---------------------------------------------------------------------------
+
+
+async def _run_direct(
+    codex_args: list[str],
+    prompt_file: str,
+    log_file: str,
+    cwd: str,
+    meta: TaskMeta,
+) -> None:
+    """Run codex directly as a subprocess, writing output to *log_file*.
+
+    Used for read-only tasks that don't need tmux persistence.
+    The function waits for the process to complete and updates *meta* in place.
+    """
+    with open(prompt_file, "r") as stdin_f, open(log_file, "w") as log_f:
+        proc = await asyncio.create_subprocess_exec(
+            *codex_args,
+            stdin=stdin_f,
+            stdout=log_f,
+            stderr=asyncio.subprocess.STDOUT,
+            cwd=cwd,
+        )
+        exit_code = await proc.wait()
+
+    with open(log_file, "a") as f:
+        f.write(f"\nEXIT_CODE={exit_code}\n")
+
+    result_text, sid, _usage = _parse_log(log_file)
+    meta.exit_code = exit_code
+    meta.status = TaskStatus.COMPLETED if exit_code == 0 else TaskStatus.FAILED
+    meta.end_time = datetime.now().isoformat()
+    meta.result = result_text
+    meta.session_id = sid
+    save_task(meta)
 
 
 # ---------------------------------------------------------------------------
@@ -294,6 +385,18 @@ async def resolve_status(task_id: str) -> TaskMeta:
     if meta.status != TaskStatus.RUNNING:
         return meta
 
+    if not meta.tmux_session:
+        exit_code = _read_exit_code(meta.log_file)
+        if exit_code is not None:
+            result_text, sid, _usage = _parse_log(meta.log_file)
+            meta.exit_code = exit_code
+            meta.status = TaskStatus.COMPLETED if exit_code == 0 else TaskStatus.FAILED
+            meta.end_time = datetime.now().isoformat()
+            meta.result = result_text
+            meta.session_id = sid
+            save_task(meta)
+        return meta
+
     alive = await tmux.session_exists(meta.tmux_session)
     exit_code = _read_exit_code(meta.log_file)
 
@@ -328,7 +431,8 @@ async def cancel_task(task_id: str) -> TaskMeta:
     if meta.status != TaskStatus.RUNNING:
         return meta
 
-    await tmux.kill_session(meta.tmux_session)
+    if meta.tmux_session:
+        await tmux.kill_session(meta.tmux_session)
     meta.status = TaskStatus.CANCELLED
     meta.end_time = datetime.now().isoformat()
     save_task(meta)

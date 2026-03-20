@@ -25,7 +25,13 @@ def build_codex_command(
     """
     codex_path = shutil.which("codex") or "codex"
     cli_sandbox = _SANDBOX_MAP.get(sandbox, sandbox)
-    cmd = [codex_path, "exec", "--sandbox", cli_sandbox, "--cd", cwd, "--json"]
+    cmd = [
+        codex_path, "exec",
+        "--sandbox", cli_sandbox,
+        "--cd", cwd,
+        "--json",
+        "--ephemeral",
+    ]
 
     profile = os.environ.get("CODEX_PROFILE", "")
     if profile:

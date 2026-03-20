@@ -12,7 +12,7 @@ MCP server for Codex CLI — tmux persistence, git worktree isolation, async dis
 
 ## 特性
 
-- **tmux 持久化** — 所有任务运行在 tmux session 中，网络断开、窗口关闭后任务继续执行
+- **tmux 持久化** — `full-access` 任务运行在 tmux session 中，网络断开、窗口关闭后任务继续执行；`read-only` 任务直接 subprocess 执行
 - **git worktree 隔离** — `full-access` 模式自动创建独立 worktree，并行任务互不干扰
 - **阻塞 + 异步双模式** — `codex` 同步等待结果，`codex_dispatch` 立即返回后台运行
 - **多轮对话 (resume)** — 通过 `session_id` 延续上一次 Codex 会话
@@ -34,7 +34,7 @@ MCP server for Codex CLI — tmux persistence, git worktree isolation, async dis
 
 - Python `3.12+`
 - `codex` CLI 已安装且在 PATH 中
-- `tmux` 已安装（所有模式必须）
+- `tmux` 已安装（`full-access` 模式必须）
 - `git` 已安装（`full-access` 模式必须）
 
 ```bash
@@ -114,7 +114,7 @@ pip install -e .
   "arguments": {
     "prompt": "审阅 src/auth/ 目录的代码质量和安全性",
     "cwd": "/workspace/my-project",
-    "topic": "review-auth",
+    "topic": "review-auth_module-v1",
     "sandbox": "read-only"
   }
 }
@@ -130,7 +130,7 @@ pip install -e .
   "arguments": {
     "prompt": "实现用户注册模块...",
     "cwd": "/workspace/my-project",
-    "topic": "impl-register",
+    "topic": "implement-user_register-v1",
     "sandbox": "full-access"
   }
 }
@@ -146,7 +146,7 @@ pip install -e .
   "arguments": {
     "prompt": "重构整个项目为异步架构...",
     "cwd": "/workspace/my-project",
-    "topic": "refactor-async",
+    "topic": "longrun-async_refactor-v1",
     "sandbox": "full-access"
   }
 }
@@ -164,12 +164,14 @@ pip install -e .
   "arguments": {
     "prompt": "我已修改了代码，请重新审阅",
     "cwd": "/workspace/my-project",
-    "topic": "review-auth-r2",
+    "topic": "review-auth_module-v2",
     "sandbox": "read-only",
-    "session_id": "thread_abc123"
+    "session_id": "019d0aa8-..."
   }
 }
 ```
+
+> resume 时 topic 版本号 +1（如 `v1`→`v2`），传入上次的 `session_id`。worktree 基于 `<type>-<description>` 生成（不含版本号），自动复用。
 
 ---
 
@@ -179,8 +181,8 @@ pip install -e .
 |------|------|------|------|
 | `prompt` | str | 是 | 任务指令 |
 | `cwd` | Path | 是 | 工作目录（绝对路径） |
-| `topic` | str | 是 | 任务标识。用于 tmux session 名、worktree 分支名、task_id |
-| `sandbox` | `read-only` / `full-access` | 是 | 权限模式。read-only 不建 worktree；full-access 创建 worktree 隔离 |
+| `topic` | str | 是 | 任务标识，格式 `<type>-<desc>-v<ver>`。用于 task_id、worktree 分支名、tmux session 名（full-access） |
+| `sandbox` | `read-only` / `full-access` | 是 | 权限模式。read-only 不建 worktree 不走 tmux；full-access 创建 worktree + tmux 隔离 |
 | `session_id` | str | 否 | 恢复之前的 Codex 会话（多轮对话） |
 
 ## 返回结构
@@ -190,14 +192,14 @@ pip install -e .
 ```json
 {
   "success": true,
-  "task_id": "codex-impl-feature",
-  "session_id": "thread_abc123",
+  "task_id": "codex-implement-user_register-v1",
+  "session_id": "019d0aa8-...",
   "result": "Codex 的最终回复文本",
   "exit_code": 0,
   "elapsed_seconds": 45.2,
   "usage": {"input_tokens": 5000, "output_tokens": 1200},
-  "worktree_dir": "/workspace/project-agent-impl-feature",
-  "agent_branch": "agent/impl-feature",
+  "worktree_dir": "/workspace/project-agent-implement-user_register",
+  "agent_branch": "agent/implement-user_register",
   "base_branch": "main",
   "diff_stat": "3 files changed, 42 insertions(+), 10 deletions(-)",
   "commits_ahead": 2
@@ -226,7 +228,7 @@ pip install -e .
 |------|------|
 | 工作区 symlink | `<cwd>/.codex-tasks/<topic>/codex-exec.log` |
 | 主存储 | `~/.codexmcp/tasks/<task_id>/codex-exec.log` |
-| 实时查看 | `tmux attach -t codex-<topic>` |
+| 实时查看 | `tmux attach -t codex-<topic>`（仅 full-access） |
 
 ---
 
