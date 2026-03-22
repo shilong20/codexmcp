@@ -449,6 +449,8 @@ These are the current code-backed limits that older docs often get wrong:
   This is the only extra Codex config exposed explicitly by the wrapper today. The wrapper no longer exposes a `model` argument. Use `high` for code-writing tasks and `xhigh` for debugging, review, analysis, or other non-writing work.
 - `sandbox`
   Use `read-only` for analysis and review. Switch to `danger-full-access` only when file edits are actually needed.
+- `CODEXMCP_READONLY_FALLBACK`
+  Set this environment variable to `1` in container environments (e.g. Docker) where the `read-only` sandbox fails due to `bwrap` namespace restrictions. When enabled, `read-only` requests internally use `danger-full-access` with strict prompt constraints and post-task log auditing. The execution path remains unchanged (no tmux/worktree). The response includes an additional `readonly_audit` field with `verdict` (`CLEAN` or `VIOLATION`) and any detected violations.
 - `profile`
   This can materially change Codex behavior. Avoid passing it unless the user explicitly asked for a named profile.
 - `dangerously_bypass_approvals_and_sandbox`

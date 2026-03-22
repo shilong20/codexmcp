@@ -9,6 +9,11 @@ _SANDBOX_MAP = {
 }
 
 
+def is_readonly_fallback() -> bool:
+    """Return True when read-only sandbox should fall back to full-access + prompt constraint."""
+    return bool(os.environ.get("CODEXMCP_READONLY_FALLBACK", ""))
+
+
 def build_codex_command(
     cwd: str,
     sandbox: str,
@@ -24,7 +29,10 @@ def build_codex_command(
     are read at call time and forwarded to the CLI when set.
     """
     codex_path = shutil.which("codex") or "codex"
-    cli_sandbox = _SANDBOX_MAP.get(sandbox, sandbox)
+    effective_sandbox = sandbox
+    if sandbox == "read-only" and is_readonly_fallback():
+        effective_sandbox = "full-access"
+    cli_sandbox = _SANDBOX_MAP.get(effective_sandbox, effective_sandbox)
     cmd = [
         codex_path, "exec",
         "--sandbox", cli_sandbox,

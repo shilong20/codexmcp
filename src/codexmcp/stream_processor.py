@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 from typing import Optional
 
@@ -137,3 +138,82 @@ class StreamProcessor:
         self._non_json_lines.append(line[:500])
         if len(self._non_json_lines) > self.NON_JSON_BUFFER_LINES:
             self._non_json_lines = self._non_json_lines[-self.NON_JSON_BUFFER_LINES :]
+
+
+# ---------------------------------------------------------------------------
+# Read-only fallback audit
+# ---------------------------------------------------------------------------
+
+_DANGEROUS_CMD_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(r"\bsed\s+-i\b"),
+    re.compile(r"\btee\s+"),
+    re.compile(r"[^<]>{1,2}\s*\S"),
+    re.compile(r"\bmv\s+"),
+    re.compile(r"\bcp\s+"),
+    re.compile(r"\brm\s+"),
+    re.compile(r"\bchmod\s+"),
+    re.compile(r"\bchown\s+"),
+    re.compile(r"\bpatch\s+"),
+    re.compile(r"\binstall\s+"),
+    re.compile(r"\bvim\s+"),
+    re.compile(r"\bnano\s+"),
+    re.compile(r"\bemacs\s+"),
+    re.compile(r"\bgit\s+commit\b"),
+    re.compile(r"\bgit\s+push\b"),
+    re.compile(r"\bgit\s+checkout\s+-b\b"),
+    re.compile(r"\bgit\s+merge\b"),
+    re.compile(r"\bgit\s+rebase\b"),
+]
+
+_DANGEROUS_TOOL_NAMES: set[str] = {
+    "write_file",
+    "edit_file",
+    "create_file",
+    "apply_patch",
+    "delete_file",
+    "rename_file",
+    "move_file",
+}
+
+
+def audit_readonly_violations(log_file: str) -> dict:
+    """Scan a codex JSONL log for file-modifying operations.
+
+    Returns a dict with keys: mode, violations_detected, violations, verdict.
+    """
+    violations: list[str] = []
+    try:
+        with open(log_file, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                try:
+                    data = json.loads(stripped)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+
+                item = data.get("item", data)
+                item_type = item.get("type", "")
+
+                if item_type == "command_execution":
+                    cmd_text = item.get("command", "")
+                    for pat in _DANGEROUS_CMD_PATTERNS:
+                        if pat.search(cmd_text):
+                            violations.append(f"command: {cmd_text[:200]}")
+                            break
+
+                if item_type == "function_call":
+                    tool_name = item.get("name", "")
+                    if tool_name in _DANGEROUS_TOOL_NAMES:
+                        args_str = str(item.get("arguments", ""))[:100]
+                        violations.append(f"tool_call: {tool_name}({args_str})")
+    except FileNotFoundError:
+        pass
+
+    return {
+        "mode": "fallback",
+        "violations_detected": len(violations),
+        "violations": violations[:20],
+        "verdict": "VIOLATION" if violations else "CLEAN",
+    }

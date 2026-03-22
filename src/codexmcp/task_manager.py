@@ -15,11 +15,28 @@ from pathlib import Path
 from typing import Any, Optional
 
 from . import tmux, worktree
-from .command_builder import build_codex_command
+from .command_builder import build_codex_command, is_readonly_fallback
 from .models import SandboxMode, TaskMeta, TaskMode, TaskStatus, TaskUsage
 from .stream_processor import StreamProcessor
 
 TASKS_ROOT = Path.home() / ".codexmcp" / "tasks"
+
+_READONLY_CONSTRAINT_PROMPT = """\
+[CRITICAL SYSTEM CONSTRAINT — READ-ONLY MODE]
+You are operating in READ-ONLY review/analysis mode.
+Although the sandbox is set to full-access due to environment limitations,
+you are STRICTLY FORBIDDEN from modifying the codebase in any way.
+
+PROHIBITED actions (non-exhaustive):
+- Writing, creating, editing, moving, copying, or deleting any file
+- Running shell commands that modify files (sed -i, tee, >, >>, patch, mv, cp, rm, chmod, etc.)
+- Using any tool/function that writes to the filesystem (write_file, edit_file, create_file, apply_patch, etc.)
+- Creating or modifying git commits, branches, or tags
+
+If you encounter something that needs fixing, REPORT it in your response.
+Do NOT attempt to fix it yourself. Any file modification is a critical violation.
+
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -216,11 +233,16 @@ async def start_task(
             )
             effective_cwd = wt_dir
 
+    # --- prompt injection for readonly fallback ---
+    effective_prompt = prompt
+    if sandbox == SandboxMode.READ_ONLY and is_readonly_fallback():
+        effective_prompt = _READONLY_CONSTRAINT_PROMPT + prompt
+
     # --- files ---
     task_dir = _ensure_task_dir(task_id)
     log_file = str(task_dir / "codex-exec.log")
     prompt_file = str(task_dir / "prompt.md")
-    Path(prompt_file).write_text(prompt, encoding="utf-8")
+    Path(prompt_file).write_text(effective_prompt, encoding="utf-8")
 
     safe_topic = re.sub(r"[^a-zA-Z0-9_-]", "-", topic).strip("-")
     _create_workspace_symlink(cwd, safe_topic, task_dir)

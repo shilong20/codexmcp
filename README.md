@@ -208,6 +208,20 @@ pip install -e .
 
 - `session_id` 用于 resume
 - worktree 相关字段仅 `full-access` 模式返回
+- 当 `CODEXMCP_READONLY_FALLBACK` 启用且 sandbox 为 `read-only` 时，返回额外的 `readonly_audit` 字段：
+
+```json
+{
+  "readonly_audit": {
+    "mode": "fallback",
+    "violations_detected": 0,
+    "violations": [],
+    "verdict": "CLEAN"
+  }
+}
+```
+
+`verdict` 为 `VIOLATION` 时表示检测到违规操作，`violations` 列出具体违规项。
 
 ---
 
@@ -219,6 +233,18 @@ pip install -e .
 |------|------|------|
 | `CODEX_PROFILE` | codex 配置文件名 | `fast` |
 | `CODEX_REASONING_EFFORT` | 推理强度 | `high`、`xhigh` |
+| `CODEXMCP_READONLY_FALLBACK` | 容器环境下启用 read-only 降级模式（见下方说明） | `1` |
+
+### Read-Only 降级模式
+
+在 Docker 等容器环境中，`read-only` sandbox 可能因 `bwrap` namespace 限制无法正常工作。设置 `CODEXMCP_READONLY_FALLBACK=1` 后：
+
+1. `read-only` 请求内部使用 `danger-full-access` 执行
+2. 自动注入强约束提示词，禁止任何文件修改操作
+3. 任务完成后自动审计日志，检测违规操作
+4. 返回结果中附加 `readonly_audit` 字段
+
+> 执行路径不变：不创建 tmux session 和 git worktree，仍走 subprocess 直接执行。
 
 ---
 

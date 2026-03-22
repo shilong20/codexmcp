@@ -11,6 +11,8 @@ from pydantic import Field
 
 from . import task_manager
 from .models import SandboxMode, TaskMode, TaskStatus
+from .command_builder import is_readonly_fallback
+from .stream_processor import audit_readonly_violations
 
 mcp = FastMCP("Codex MCP Server-from guda.studio")
 
@@ -53,6 +55,9 @@ def _build_result(meta: task_manager.TaskMeta) -> Dict[str, Any]:
         resp["worktree_dir"] = meta.worktree_dir
         resp["agent_branch"] = meta.agent_branch
         resp["base_branch"] = meta.base_branch
+    # readonly fallback audit
+    if meta.sandbox == SandboxMode.READ_ONLY and is_readonly_fallback():
+        resp["readonly_audit"] = audit_readonly_violations(meta.log_file)
     return resp
 
 
