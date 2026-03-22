@@ -8,9 +8,10 @@ server restarts.  The actual codex process runs inside a tmux session.
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 import shlex
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
 
@@ -37,6 +38,73 @@ If you encounter something that needs fixing, REPORT it in your response.
 Do NOT attempt to fix it yourself. Any file modification is a critical violation.
 
 """
+
+
+# ---------------------------------------------------------------------------
+# Cleanup
+# ---------------------------------------------------------------------------
+
+_KEEP_RECENT_COUNT = int(os.environ.get("CODEXMCP_KEEP_TASKS", "10"))
+_KEEP_RECENT_SECONDS = int(os.environ.get("CODEXMCP_KEEP_SECONDS", "3600"))
+
+
+def _cleanup_old_tasks() -> None:
+    """Remove completed task dirs beyond the retention policy.
+
+    Retention policy: ``max(last _KEEP_RECENT_COUNT tasks, tasks within
+    _KEEP_RECENT_SECONDS)``.  Running tasks are never removed.
+    Also cleans stale workspace symlinks.
+    """
+    if not TASKS_ROOT.exists():
+        return
+    completed: list[tuple[str, str, Path]] = []  # (end_time, task_id, dir)
+    for d in TASKS_ROOT.iterdir():
+        meta_file = d / "meta.json"
+        if not meta_file.exists():
+            continue
+        try:
+            meta = TaskMeta.model_validate_json(meta_file.read_text())
+        except Exception:
+            continue
+        if meta.status == TaskStatus.RUNNING:
+            continue
+        completed.append((meta.end_time or meta.start_time, meta.task_id, d))
+
+    if not completed:
+        return
+
+    completed.sort(key=lambda x: x[0], reverse=True)
+    cutoff = (datetime.now() - timedelta(seconds=_KEEP_RECENT_SECONDS)).isoformat()
+
+    # keep = max(last N, within 1h)
+    keep_by_count = set(tid for _, tid, _ in completed[:_KEEP_RECENT_COUNT])
+    keep_by_time = set(tid for ts, tid, _ in completed if ts >= cutoff)
+    keep = keep_by_count | keep_by_time
+
+    for _ts, task_id, task_dir in completed:
+        if task_id in keep:
+            continue
+        _remove_symlinks_for(task_dir)
+        import shutil as _shutil
+        _shutil.rmtree(task_dir, ignore_errors=True)
+
+
+def _remove_symlinks_for(task_dir: Path) -> None:
+    """Remove any workspace symlinks that point to *task_dir*."""
+    try:
+        meta = TaskMeta.model_validate_json((task_dir / "meta.json").read_text())
+    except Exception:
+        return
+    cwd = Path(meta.cwd)
+    link_dir = cwd / ".codex-tasks"
+    if not link_dir.is_dir():
+        return
+    for link in link_dir.iterdir():
+        try:
+            if link.is_symlink() and link.resolve() == task_dir.resolve():
+                link.unlink()
+        except OSError:
+            continue
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +242,8 @@ async def start_task(
     When *sandbox* is ``FULL_ACCESS`` and *cwd* is inside a git repo, a
     worktree is created for isolation.
     """
+    _cleanup_old_tasks()
+
     topic_type, topic_desc, _topic_ver = parse_topic(topic)
 
     use_tmux = sandbox == SandboxMode.FULL_ACCESS
