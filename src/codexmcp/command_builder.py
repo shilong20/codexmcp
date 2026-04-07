@@ -38,7 +38,6 @@ def build_codex_command(
         "--sandbox", cli_sandbox,
         "--cd", cwd,
         "--json",
-        "--ephemeral",
     ]
 
     profile = os.environ.get("CODEX_PROFILE", "")
